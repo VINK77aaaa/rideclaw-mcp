@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""调用龙下出行（RideClaw）Code Mode 端点（run_code，goja 沙箱执行 JS）。
+"""调用龙虾出行（RideClaw）Code Mode 端点（run_code，goja 沙箱执行 JS）。
 
 用于需要多步/条件/循环编排的复杂查询，例如：
   "先查今天的航班，若最低价超 2000 再查明天"。
@@ -7,6 +7,7 @@
 用法：
   python3 code_mode.py --code 'const r=await rideclaw.flight.search({...}); return JSON.stringify(r);'
   python3 code_mode.py --file /path/to/code.js
+  # 环境：默认 prod；--env sandbox 需先 export RIDECLAW_SANDBOX_BASE=...
   # 可选：--no-retry 关闭退避重试；--timeout 秒数（默认 30）
 
 沙箱约束（官方 Code Mode 页）：
@@ -24,7 +25,7 @@ import argparse
 import json
 import sys
 
-from rideclaw_common import CODE_URL, finish, get_token, rpc_with_retry
+from rideclaw_common import endpoint_url, finish, get_token, rpc_with_retry
 
 
 def main():
@@ -32,11 +33,16 @@ def main():
     p.add_argument("--code", default=None, help="要执行的 JavaScript 代码")
     p.add_argument("--file", default=None, help="JS 代码文件路径，与 --code 二选一")
     p.add_argument("--token", default=None, help="Bearer Token（优先用环境变量 RIDECLAW_TOKEN）")
+    p.add_argument("--env", choices=["prod", "sandbox"], default="prod",
+                   help="目标环境，默认 prod；sandbox 需额外提供 RIDECLAW_SANDBOX_BASE")
+    p.add_argument("--base-url", default=None,
+                   help="覆盖 API 域名（如 https://api.longxiachuxing.com）")
     p.add_argument("--timeout", type=int, default=30, help="单次请求超时秒数，默认 30")
     p.add_argument("--no-retry", action="store_true", help="关闭限流/偶发错误的退避重试")
     p.add_argument("--retry-backoff", type=float, default=1.0,
                    help="退避初始秒数（默认 1.0，指数递增），测试用")
-    p.add_argument("--url", default=None, help="覆盖端点 URL（测试注入用，勿在生产使用）")
+    p.add_argument("--url", default=None,
+                   help="覆盖完整端点 URL（测试注入用，优先级最高）")
     args = p.parse_args()
 
     if bool(args.code) == bool(args.file):
@@ -54,7 +60,7 @@ def main():
             print(f"错误: 读取代码文件失败: {e}", file=sys.stderr)
             sys.exit(2)
 
-    outcome = rpc_with_retry(args.url or CODE_URL, token, "tools/call",
+    outcome = rpc_with_retry(endpoint_url(args, "code"), token, "tools/call",
                              {"name": "run_code", "arguments": {"code": code}},
                              timeout=args.timeout, retries=0 if args.no_retry else 4,
                              backoff=args.retry_backoff)

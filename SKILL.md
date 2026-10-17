@@ -1,15 +1,15 @@
 ---
 name: rideclaw-mcp
-description: 调用龙下出行（RideClaw）开放平台的 MCP 服务。当需要查询机票、酒店、打车、城际巴士、高铁、地理/天气，或创建/支付/退改订单时使用；也用于通过 Code Mode 的 run_code 沙箱执行 JS 编排多步/条件查询。命中场景：用户要查机票价格与航班、订酒店、打车估价、查长途大巴班次、查高铁车次、查天气或 POI，以及需要"先查这个再判断查那个"的复合出行查询。
+description: 调用龙虾出行（RideClaw）开放平台的 MCP 服务。当需要查询机票、酒店、打车、城际巴士、高铁、地理/天气，或创建/支付/退改订单时使用；也用于通过 Code Mode 的 run_code 沙箱执行 JS 编排多步/条件查询。命中场景：用户要查机票价格与航班、订酒店、打车估价、查长途大巴班次、查高铁车次、查天气或 POI，以及需要"先查这个再判断查那个"的复合出行查询。
 ---
 
-# RideClaw MCP（龙下出行开放平台）
+# RideClaw MCP（龙虾出行开放平台）
 
 ## 概述
 
 两套 JSON-RPC 2.0 端点，同一把 Bearer Token 鉴权（Token 形如 `rdak_live_...`，来自用户偏好，Agent 调用前从上下文取得，通过环境变量 `RIDECLAW_TOKEN` 传入，脚本会自动加 `Bearer ` 前缀）：
 
-- **标准 MCP**：`https://api.longxiachuxing.com/open/v1/mcp`，公开工具以 `tools/list` 实时返回为准（本文档写作时为 53 个：机票/酒店/打车/巴士/高铁/地理/天气 + 订单/退改/支付；官方文档不同页面的数字有漂移，勿硬信任何数字）。
+- **标准 MCP**：`https://api.longxiachuxing.com/open/v1/mcp`，公开工具以 `tools/list` 实时返回为准（2026-10-18 实测 59 个：机票/酒店/打车/巴士/高铁/地理/天气 + 订单/退改/支付；官方文档不同页面的数字有漂移，勿硬信任何数字）。
 - **Code Mode**：`https://api.longxiachuxing.com/open/v1/mcp/code`，仅 `run_code`，沙箱执行 JS，用 `rideclaw.<domain>.<action>()` 编排多步/条件查询。
 
 ## 快速开始（标准 MCP）
@@ -17,7 +17,8 @@ description: 调用龙下出行（RideClaw）开放平台的 MCP 服务。当需
 优先用自带脚本，避免手写 JSON-RPC：
 
 ```bash
-# Token 从用户偏好取得后先放进环境变量（不要写进命令行参数，会进 shell history）
+# Token 来源优先级：RIDECLAW_TOKEN 环境变量 → ~/.rideclaw/credentials.env → --token
+# 凭据文件存在时通常无需 export，脚本会自动兜底读取
 export RIDECLAW_TOKEN=rdak_live_xxx
 
 # 列出全部工具（工具数量与名称以本命令实时输出为准）
@@ -34,14 +35,24 @@ python3 scripts/mcp_call.py call flight_search \
 python3 scripts/mcp_call.py call flight_search \
   --arg trip_mode=domestic --arg trip_type=oneway \
   --arg from_code=CAN --arg to_code=SHA --arg depart_date=2026-10-18
+
+# 只看必填/可选参数摘要（省上下文）
+python3 scripts/mcp_call.py describe flight_search --brief
 ```
 
 可选参数：`--timeout 30`（单次请求超时秒数）、`--no-retry`（关闭限流/偶发错误的退避重试）。
 
+## 环境与鉴权
+
+- **默认生产**：`--env prod`（可省略），域名 `https://api.longxiachuxing.com`。
+- **sandbox**：官方未公布 sandbox 域名，必须先 `export RIDECLAW_SANDBOX_BASE=https://<官方给的域名>`，再加 `--env sandbox`；也可用 `--base-url` / `RIDECLAW_BASE_URL` 指定任意域名。
+- **只发 Bearer**：官方《鉴权说明》明确 `/open/v1/*`「无需自行计算签名」。不要额外加 `X-App-Key`——实测带上它网关会转而索要 `X-Timestamp/X-Nonce/X-Sign`（`40102` / `40105`），那是另一条通道。
+- **令牌环境必须匹配**：`rdak_test_` 令牌打生产会返回 `40302`。脚本已在本地拦截（退出码 2，不发请求），看到该提示就换令牌或改 `--env`，不要重试。
+
 ## 工作流
 
 1. **判定端点**：单步查询（查机票/酒店/巴士/火车/天气/POI）→ 标准 MCP 的对应工具；多步、条件分支、循环编排 → Code Mode 的 `run_code`。
-2. **取 Token**：从用户偏好中取龙下出行 Token（`rdak_live_...`），`export RIDECLAW_TOKEN=...` 后调用。**不要把 Token 写进日志、回复、命令行参数或任何产物。**
+2. **取 Token**：优先读环境变量 `RIDECLAW_TOKEN`；没有则自动读 `~/.rideclaw/credentials.env`（纯文本 `KEY=VALUE`，与私密凭据仓库同步）；`--token` 仅作最后兜底。**不要把 Token 写进日志、回复或任何产物。**
 3. **调工具**：用 `scripts/mcp_call.py` 调标准工具（拿不准参数先 `describe`），用 `scripts/code_mode.py` 跑 JS。
 4. **解析结果**：工具返回 `content[].text`（多为 JSON 字符串）与可选 `structuredContent`。Agent 只取关键信息回给用户（如最便宜的前 3 班），避免上下文溢出。
 5. **错误修正**：按下方「错误处理」分诊，不要盲目重试。
@@ -98,7 +109,7 @@ return JSON.stringify({total:r.total,top3});'
 
 ## 工具目录
 
-`references/tools.md` 是官方 53 工具的静态对照表（参数摘要）。**精确参数名/必填项/枚举以 `mcp_call.py describe <tool>` 的实时 `inputSchema` 为准**——官方文档自身在漂移（不同页面写 15/53 个工具、退改签"待上线"但工具已在列），勿把静态表当权威。
+`references/tools.md` 是官方工具的静态对照表（参数摘要，写作时 53 个、实测已增至 59 个）。**精确参数名/必填项/枚举以 `mcp_call.py describe <tool>` 的实时 `inputSchema` 为准**——官方文档自身在漂移（不同页面写 15/53 个工具、退改签"待上线"但工具已在列），勿把静态表当权威。
 
 ## 边界与注意
 

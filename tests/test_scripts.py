@@ -14,9 +14,12 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(HERE, "..", "scripts")
@@ -26,6 +29,14 @@ import rideclaw_common as rc  # noqa: E402
 
 
 class TestUnit(unittest.TestCase):
+    def setUp(self):
+        # 隔离真实凭据文件，避免本机 ~/.rideclaw/credentials.env 影响断言
+        self._orig_creds = rc.CREDENTIALS_FILE
+        rc.CREDENTIALS_FILE = os.path.join(tempfile.gettempdir(), "rideclaw-no-such.env")
+
+    def tearDown(self):
+        rc.CREDENTIALS_FILE = self._orig_creds
+
     def test_mask_hides_token(self):
         text = "bad request for rdak_live_abcdef123456xyz done"
         out = rc.mask(text)
@@ -48,6 +59,71 @@ class TestUnit(unittest.TestCase):
                          {"a": 1, "b": True, "c": "2026-10-18", "d": "x=y"})
         with self.assertRaises(SystemExit):
             mcp_call.parse_kvs(["noequals"])
+
+    # ---- 环境切换 / 令牌环境一致性 ----
+
+    def test_base_url_defaults_to_prod(self):
+        args = SimpleNamespace(env="prod", base_url=None, url=None)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(rc.BASE_URL_ENV, None)
+            os.environ.pop(rc.SANDBOX_BASE_ENV, None)
+            self.assertEqual(rc.resolve_base_url(args), rc.PROD_BASE)
+
+    def test_base_url_env_override(self):
+        args = SimpleNamespace(env="prod", base_url=None, url=None)
+        with mock.patch.dict(os.environ, {rc.BASE_URL_ENV: "https://example.test/"}):
+            self.assertEqual(rc.resolve_base_url(args), "https://example.test")
+
+    def test_base_url_flag_beats_env(self):
+        args = SimpleNamespace(env="prod", base_url="https://flag.test/", url=None)
+        with mock.patch.dict(os.environ, {rc.BASE_URL_ENV: "https://env.test"}):
+            self.assertEqual(rc.resolve_base_url(args), "https://flag.test")
+
+    def test_sandbox_requires_explicit_host(self):
+        args = SimpleNamespace(env="sandbox", base_url=None, url=None)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(rc.BASE_URL_ENV, None)
+            os.environ.pop(rc.SANDBOX_BASE_ENV, None)
+            with self.assertRaises(SystemExit):
+                rc.resolve_base_url(args)
+        with mock.patch.dict(os.environ, {rc.SANDBOX_BASE_ENV: "https://sb.test"}):
+            self.assertEqual(rc.resolve_base_url(args), "https://sb.test")
+
+    def test_endpoint_url_paths_and_override(self):
+        args = SimpleNamespace(env="prod", base_url=None, url=None)
+        self.assertEqual(rc.endpoint_url(args, "mcp"), rc.PROD_BASE + "/open/v1/mcp")
+        self.assertEqual(rc.endpoint_url(args, "code"), rc.PROD_BASE + "/open/v1/mcp/code")
+        # --url 是完整端点覆盖，测试注入用
+        args2 = SimpleNamespace(env="prod", base_url=None, url="http://127.0.0.1:1/mcp")
+        self.assertEqual(rc.endpoint_url(args2, "code"), "http://127.0.0.1:1/mcp")
+
+    def test_check_token_env(self):
+        self.assertIn("40302", rc.check_token_env("prod", "rdak_test_x"))
+        self.assertIn("sandbox", rc.check_token_env("sandbox", "rdak_live_x"))
+        self.assertIsNone(rc.check_token_env("prod", "rdak_live_x"))
+        self.assertIsNone(rc.check_token_env("sandbox", "rdak_test_x"))
+
+    # ---- 凭据文件兜底 ----
+
+    def test_load_credentials_file(self):
+        p = os.path.join(tempfile.gettempdir(), "rideclaw-creds-unit.env")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write('# 注释\n\nRIDECLAW_TOKEN=rdak_live_filetoken\nQ="quoted"\nbadline\n')
+        d = rc.load_credentials_file(p)
+        self.assertEqual(d["RIDECLAW_TOKEN"], "rdak_live_filetoken")
+        self.assertEqual(d["Q"], "quoted")
+        self.assertNotIn("badline", d)
+        self.assertEqual(rc.load_credentials_file(p + ".missing"), {})
+
+    def test_token_falls_back_to_credentials_file(self):
+        p = os.path.join(tempfile.gettempdir(), "rideclaw-creds-unit2.env")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("RIDECLAW_TOKEN=rdak_live_fromfile\n")
+        rc.CREDENTIALS_FILE = p
+        args = SimpleNamespace(token=None, env="prod")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RIDECLAW_TOKEN", None)
+            self.assertEqual(rc.get_token(args), "rdak_live_fromfile")
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -230,6 +306,31 @@ class FakeServerTest(unittest.TestCase):
         self.assertEqual(p.returncode, 2)
         self.assertIn("前缀", p.stderr)
         self.assertEqual(len(self.requests), n_before)  # 无新增请求
+
+    def test_e2e_sandbox_token_on_prod_fails_fast(self):
+        """rdak_test_ 令牌打生产环境：本地就拦掉，不发请求（否则只会拿到 40302）。"""
+        n_before = len(self.requests)
+        p = self.run_script("mcp_call.py", ["list", "--no-retry"], token="rdak_test_abc")
+        self.assertEqual(p.returncode, 2)
+        self.assertIn("40302", p.stderr)
+        self.assertIn("--env sandbox", p.stderr)
+        self.assertEqual(len(self.requests), n_before)
+
+    def test_e2e_describe_brief(self):
+        self.responses.append({"status": 200, "body": {
+            "jsonrpc": "2.0", "id": 1, "result": {"tools": [{
+                "name": "flight_search",
+                "description": "搜索航班",
+                "inputSchema": {"type": "object",
+                                "properties": {"trip_mode": {}, "from_code": {},
+                                               "to_code": {}},
+                                "required": ["trip_mode", "from_code"]}}]}}})
+        p = self.run_script("mcp_call.py",
+                            ["describe", "flight_search", "--brief", "--no-retry",
+                             "--url", f"{self.base_url}/mcp"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("必填: trip_mode, from_code", p.stdout)
+        self.assertIn("可选: to_code", p.stdout)
 
     def test_e2e_code_mode_ok(self):
         self.responses.append({"status": 200, "body": {

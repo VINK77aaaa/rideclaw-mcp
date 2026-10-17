@@ -1,6 +1,6 @@
 # RideClaw 标准 MCP 工具目录
 
-标准端点 `/open/v1/mcp` 的公开工具以 `tools/list` 实时返回为准（官方文档口径为 **53 个**，且官方各页面间数字有漂移——勿把本表或任何数字当权威，用 `python3 scripts/mcp_call.py list` / `describe <tool>` 查实时定义）。
+标准端点 `/open/v1/mcp` 的公开工具以 `tools/list` 实时返回为准（本表写作时官方口径为 **53 个**，2026-10-18 实测已增至 **59 个**，且官方各页面间数字有漂移——勿把本表或任何数字当权威，用 `python3 scripts/mcp_call.py list` / `describe <tool>` 查实时定义）。
 工具名用下划线；`tools/call` 也兼容点号别名（如 `flight.search`），新接入建议用下划线名。
 
 ## 基础字典与机场（5）

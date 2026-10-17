@@ -18,8 +18,19 @@ import sys
 import urllib.error
 import urllib.request
 
-MCP_URL = "https://api.longxiachuxing.com/open/v1/mcp"
-CODE_URL = "https://api.longxiachuxing.com/open/v1/mcp/code"
+PROD_BASE = "https://api.longxiachuxing.com"
+MCP_PATH = "/open/v1/mcp"
+CODE_PATH = "/open/v1/mcp/code"
+
+# 兼容旧引用：默认生产环境的完整端点
+MCP_URL = PROD_BASE + MCP_PATH
+CODE_URL = PROD_BASE + CODE_PATH
+
+# 环境切换用的环境变量（官方文档只公布了生产域名，sandbox 域名未公开，
+# 因此 sandbox 必须由使用者显式提供，不做任何猜测性硬编码）
+BASE_URL_ENV = "RIDECLAW_BASE_URL"
+SANDBOX_BASE_ENV = "RIDECLAW_SANDBOX_BASE"
+
 DEFAULT_TIMEOUT = 30  # 官方 Python 示例同款：requests.post(..., timeout=30)
 
 # 官方错误码页：可重试类。429xx 退避后重试；50001 偶发内部错误 1~2s 后重试；
@@ -27,6 +38,36 @@ DEFAULT_TIMEOUT = 30  # 官方 Python 示例同款：requests.post(..., timeout=
 RETRYABLE_CODES = {42901, 42902, 50001, 50301, 50401}
 
 TOKEN_RE = re.compile(r"(rdak_(?:live|test)_[A-Za-z0-9]+)")
+
+# 凭据文件：环境变量缺失时的兜底来源（纯文本 KEY=VALUE，权限自行收紧）
+CREDENTIALS_FILE = os.path.join(os.path.expanduser("~"), ".rideclaw", "credentials.env")
+
+
+def load_credentials_file(path=None) -> dict:
+    """读取凭据文件，返回 {KEY: VALUE}；文件不存在或不可读时返回空 dict。
+
+    只做最朴素的 KEY=VALUE 解析（忽略空行与 # 注释，去掉成对引号），
+    不执行任何 shell 展开，避免把凭据文件当成脚本跑。
+    """
+    p = path or CREDENTIALS_FILE
+    try:
+        with open(p, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return {}
+    out = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _creds_value(key):
+    """环境变量优先，其次凭据文件。"""
+    return os.environ.get(key) or load_credentials_file().get(key) or ""
 
 
 def mask(text: str) -> str:
@@ -44,17 +85,74 @@ def detect_token_problem(token: str):
     return None
 
 
+def check_token_env(env: str, token: str):
+    """本地拦截「令牌环境 ≠ 目标环境」，避免白跑一次网络换回 40302。
+
+    官方生产域名对 rdak_test_ 令牌直接返回
+    ``40302 令牌环境与当前平台不一致（platform=prod, token=sandbox）``，
+    这条错误对 Agent 没有可操作性，所以在本地就变成可读的用法错误。
+    """
+    if env == "prod" and token.startswith("rdak_test_"):
+        return ("Token 是 sandbox 令牌（rdak_test_），但当前指向生产环境：官方生产域名会直接返回 "
+                "40302「令牌环境与当前平台不一致」。请改用 rdak_live_ 令牌，"
+                f"或加 --env sandbox 并设置 {SANDBOX_BASE_ENV}。")
+    if env == "sandbox" and token.startswith("rdak_live_"):
+        return ("Token 是生产令牌（rdak_live_），但当前指向 sandbox 环境，"
+                "sandbox 会拒绝生产令牌。请改用 rdak_test_ 令牌，或去掉 --env sandbox。")
+    return None
+
+
 def get_token(args) -> str:
-    t = getattr(args, "token", None) or os.environ.get("RIDECLAW_TOKEN") or ""
+    t = getattr(args, "token", None) or _creds_value("RIDECLAW_TOKEN")
     if not t:
-        print("错误: 缺少 Token。请通过环境变量 RIDECLAW_TOKEN 提供（优先），或 --token 参数。",
+        print("错误: 缺少 Token。请通过环境变量 RIDECLAW_TOKEN 提供（优先），"
+              f"或写入 {CREDENTIALS_FILE}，或 --token 参数。",
               file=sys.stderr)
         sys.exit(2)
     problem = detect_token_problem(t)
     if problem:
         print("错误: " + problem, file=sys.stderr)
         sys.exit(2)
+    env = getattr(args, "env", "prod") or "prod"
+    env_problem = check_token_env(env, t)
+    if env_problem:
+        print("错误: " + env_problem, file=sys.stderr)
+        sys.exit(2)
     return t
+
+
+def resolve_base_url(args) -> str:
+    """解析 API 域名，优先级：--base-url > RIDECLAW_BASE_URL > 内置环境映射。
+
+    注意 ``--url`` 不参与这里：它是「完整端点 URL」覆盖，仅供测试注入，
+    优先级高于本函数（见 endpoint_url）。
+    """
+    explicit = getattr(args, "base_url", None)
+    if explicit:
+        return explicit.rstrip("/")
+    from_env = _creds_value(BASE_URL_ENV)
+    if from_env:
+        return from_env.rstrip("/")
+    env = getattr(args, "env", "prod") or "prod"
+    if env == "prod":
+        return PROD_BASE
+    sandbox = os.environ.get(SANDBOX_BASE_ENV)
+    if sandbox:
+        return sandbox.rstrip("/")
+    print(f"错误: --env sandbox 需要 sandbox 域名，但官方文档只公布了生产域名 "
+          f"{PROD_BASE}，未公布 sandbox 域名。\n"
+          f"      请从开放平台控制台 / 运营处取得 sandbox 域名后，用环境变量提供：\n"
+          f"        export {SANDBOX_BASE_ENV}=https://<sandbox-域名>\n"
+          f"      或直接用 --base-url 指定。不要凭猜测填域名。", file=sys.stderr)
+    sys.exit(2)
+
+
+def endpoint_url(args, kind: str = "mcp") -> str:
+    """拼出完整端点。--url（测试注入）优先，其次 base_url + 路径。"""
+    override = getattr(args, "url", None)
+    if override:
+        return override
+    return resolve_base_url(args) + (CODE_PATH if kind == "code" else MCP_PATH)
 
 
 class RpcOutcome:
