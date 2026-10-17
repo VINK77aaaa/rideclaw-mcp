@@ -1,7 +1,7 @@
 # RideClaw 标准 MCP 工具目录
 
-标准端点 `/open/v1/mcp` 公开 **59 个工具**（以 `tools/list` 实时返回为准）。
-工具名用下划线；`tools/call` 也兼容点号别名（如 `flight.search`）。
+标准端点 `/open/v1/mcp` 的公开工具以 `tools/list` 实时返回为准（官方文档口径为 **53 个**，且官方各页面间数字有漂移——勿把本表或任何数字当权威，用 `python3 scripts/mcp_call.py list` / `describe <tool>` 查实时定义）。
+工具名用下划线；`tools/call` 也兼容点号别名（如 `flight.search`），新接入建议用下划线名。
 
 ## 基础字典与机场（5）
 | 工具 | 用途 | 关键参数 |
@@ -15,13 +15,13 @@
 ## 机票（12）
 | 工具 | 用途 | 关键参数 |
 |---|---|---|
-| `flight_search` | 航班列表查询 | `from_code`, `to_code`, `depart_date`, `trip_mode`(domestic/international), `trip_type`(oneway/roundtrip), `passengers`, `page_size`, `sort_by` |
+| `flight_search` | 航班列表查询 | `trip_mode`(必填), `trip_type`(必填), `from_code`(必填), `to_code`(必填), `depart_date`(必填), `passengers`, `page_size`, `sort_by`；往返需另传 `return_date` |
 | `flight_airport_search` | 机场搜索 | `keyword` |
 | `flight_airports` | 机场详情 | `iata` |
 | `flight_city_airport` | 城市机场查询 | `city` |
 | `flight_pricing` | 验价 | `search_offer_id`, `passengers` |
 | `flight_order_create` | 创建订单 | `offer_id`, `out_trade_no`, `passengers`, `contact` |
-| `flight_order_pay` | 发起支付 | `system_no`, `pay_type` |
+| `flight_order_pay` | 发起支付 | `system_no`, `pay_type`（枚举含 wechat_h5/jsapi/native/app/mini、alipay_app/h5/pc、allinpay_h5/checkout/mini；先 `payment_capabilities` 查可用项） |
 | `flight_order_detail` | 订单详情 | `system_no` / `out_trade_no` |
 | `flight_order_list` | 订单列表 | `status`, `start_date`, `end_date` |
 | `flight_order_cancel_fee` | 查询取消手续费 | `order_id` |
@@ -31,10 +31,10 @@
 ## 酒店（8）
 | 工具 | 用途 | 关键参数 |
 |---|---|---|
-| `hotel_search` | 酒店列表 | `destination`, `check_in`, `check_out` |
+| `hotel_search` | 酒店列表 | `destination`, `check_in`, `check_out`（check_out 必须晚于 check_in，不可过去日期，单次最多 50 条） |
 | `hotel_detail` | 酒店详情 | `hotel_id` |
 | `hotel_rooms` | 房型与可订产品 | `search_offer_id` |
-| `hotel_order_create` | 创建酒店订单 | `offer_id`, `out_trade_no`, `guests`, `contact` |
+| `hotel_order_create` | 创建酒店订单 | `offer_id`（**必须来自 `hotel_rooms` 的产品级 offer_id，不可用 `search_offer_id`**）, `out_trade_no`, `guests`, `contact` |
 | `hotel_order_pay` | 发起酒店支付 | `order_no`, `pay_type` |
 | `hotel_order_list` | 订单列表 | `status`, `start_date`, `end_date` |
 | `hotel_order_detail` | 订单详情 | `order_no` |
@@ -81,20 +81,22 @@
 | `geo_geocode` | 地址编码 | `address` |
 | `geo_coords_convert` | 坐标系转换 | `locations`, `coordsys` |
 | `geo_routes_plan` | 路线规划 | `mode`, `origin`, `destination` |
-| `weather_current` | 实时天气 | `destination` |
-| `weather_forecast` | 天气预报 | `destination` |
+| `weather_current` | 实时天气 | `destination`（中文名或 6 位 adcode） |
+| `weather_forecast` | 天气预报 | `destination`（高德返回当天至第 4 天） |
 
 ## 交易链路令牌流转
 ```
 搜索(→search_offer_id) → 验价(→offer_id) → 创建订单(→system_no) → 支付
 ```
 - `search_offer_id` / `offer_id` 有效期 **10 分钟**，超时需重新搜索/验价。
+- 机票订单创建后有支付窗口 `pay_expire_time`（一般 15 分钟，超时自动关单）。
+- 酒店两步下单：`search_offer_id` 仅用于 `hotel_rooms` 查房型，下单必须用产品级 `offer_id`。
 - 订单创建幂等键：`<app_id, out_trade_no>`；重复调用返回首次订单。
 - 支付成功后平台异步推进状态，通过 Webhook 推送，不建议轮询 `order_detail`。
 
 ## Code Mode（独立端点）
-`/open/v1/mcp/code` 只注册 1 个工具：`run_code`（沙箱执行 JS）。
-- 可调用 `rideclaw.flight.search()`、`rideclaw.hotel.search()` 等 `rideclaw.<domain>.<action>()` 方法。
-- 代码必须 `return` 最终结果（返回给用户），中间数据留在沙箱。
-- 适用多步/条件/循环编排，例如"先查今天，价格超 2000 再看明天"。
+`/open/v1/mcp/code` 只注册 1 个工具：`run_code`（goja 沙箱执行 JS）。
+- 可调用 `rideclaw.flight.search()`、`rideclaw.hotel.search()` 等方法；**可用能力仅官方文档沙箱清单的 15 个**（flight 9 个、hotel 3 个、`taxi.estimate`、`train.search`、`bus.search`）——geo/weather 与大部分订单操作不在其中，需走标准 MCP。
+- 硬约束：单次最多 **20 次能力调用**、**30 秒超时**；支持 `const/let`/箭头函数/模板字符串/解构，**不支持 `class`/`import`/`export`**；顶层 `await` 自动包裹。
+- 代码必须 `return` 最终结果；成功响应为 `{value, tool_calls, log[, error]}`，`console.log` 输出随 `log` 返回。
 - Token 由平台自动注入沙箱，`run_code` 参数里不要手动传 Token 字段。
