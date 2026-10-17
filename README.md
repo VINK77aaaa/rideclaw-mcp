@@ -1,3 +1,5 @@
+> **本仓库已合并至 [agent-skills](https://github.com/VINK77aaaa/agent-skills)** — 统一入口，clone 一次即可装全部技能。本仓库仅作历史留存，不再更新。
+
 # rideclaw-mcp
 
 龙虾出行（RideClaw）开放平台 MCP 调用技能：标准 MCP 工具（以 `tools/list` 实时返回为准，2026-10-18 实测 **59 个**）+ Code Mode 沙箱编排。
